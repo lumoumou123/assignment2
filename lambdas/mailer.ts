@@ -23,32 +23,54 @@ const client = new SESClient({ region: SES_REGION});
 export const handler: SQSHandler = async (event: any) => {
   console.log("Event ", JSON.stringify(event));
   for (const record of event.Records) {
-    const recordBody = JSON.parse(record.body);
-    const snsMessage = JSON.parse(recordBody.Message);
-
-    if (snsMessage.Records) {
-      console.log("Record body ", JSON.stringify(snsMessage));
-      for (const messageRecord of snsMessage.Records) {
-        const s3e = messageRecord.s3;
-        const srcBucket = s3e.bucket.name;
-        // Object key may have spaces or unicode non-ASCII characters.
-        const srcKey = decodeURIComponent(s3e.object.key.replace(/\+/g, " "));
-        try {
-          const { name, email, message }: ContactDetails = {
-            name: "The Photo Album",
-            email: SES_EMAIL_FROM,
-            message: `We received your Image. Its URL is s3://${srcBucket}/${srcKey}`,
-          };
-          const params = sendEmailParams({ name, email, message });
-          await client.send(new SendEmailCommand(params));
-        } catch (error: unknown) {
-          console.log("ERROR is: ", error);
-          // return;
+    try {
+      // 检查 body 是否已经是对象
+      const recordBody = typeof record.body === 'string' 
+        ? JSON.parse(record.body) 
+        : record.body;
+      
+      // 处理直接从 S3 到 SQS 的消息格式
+      if (recordBody.Records && recordBody.Records[0].s3) {
+        // 直接来自S3的事件通知
+        handleS3Event(recordBody);
+      } 
+      // 处理 SNS 到 SQS 的消息格式
+      else if (recordBody.Message) {
+        const snsMessage = typeof recordBody.Message === 'string'
+          ? JSON.parse(recordBody.Message)
+          : recordBody.Message;
+        
+        if (snsMessage.Records) {
+          handleS3Event(snsMessage);
         }
       }
+    } catch (error) {
+      console.error("Error processing record:", error);
     }
   }
 };
+
+async function handleS3Event(eventData: any) {
+  console.log("Processing S3 event:", JSON.stringify(eventData));
+  for (const messageRecord of eventData.Records) {
+    const s3e = messageRecord.s3;
+    const srcBucket = s3e.bucket.name;
+    // Object key may have spaces or unicode non-ASCII characters.
+    const srcKey = decodeURIComponent(s3e.object.key.replace(/\+/g, " "));
+    try {
+      const { name, email, message }: ContactDetails = {
+        name: "The Photo Album",
+        email: SES_EMAIL_FROM,
+        message: `We received your Image. Its URL is s3://${srcBucket}/${srcKey}`,
+      };
+      const params = sendEmailParams({ name, email, message });
+      await client.send(new SendEmailCommand(params));
+      console.log("Email sent successfully for", srcKey);
+    } catch (error: unknown) {
+      console.log("ERROR sending email: ", error);
+    }
+  }
+}
 
 function sendEmailParams({ name, email, message }: ContactDetails) {
   const parameters: SendEmailCommandInput = {
@@ -91,7 +113,7 @@ function getHtmlContent({ name, email, message }: ContactDetails) {
   `;
 }
 
- // For demo purposes - not used here.
+// For demo purposes - not used here.
 function getTextContent({ name, email, message }: ContactDetails) {
   return `
     Received an Email. 📬
